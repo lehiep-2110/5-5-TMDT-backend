@@ -1,0 +1,6 @@
+export enum StockReason {
+  INITIAL_IMPORT = 'INITIAL_IMPORT',
+  PURCHASE = 'PURCHASE',
+  SALE = 'SALE',
+  CANCEL_RESTORE = 'CANCEL_RESTORE',
+}
