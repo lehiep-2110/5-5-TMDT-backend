@@ -454,7 +454,7 @@ export class BooksService {
         isbn: dto.isbn,
         publisherId: dto.publisherId,
         categoryId: dto.categoryId,
-        language: dto.language ?? 'Tieng Viet',
+        language: dto.language ?? 'Tiếng Việt',
         yearPublished: dto.yearPublished ?? null,
         price: String(dto.price),
         discountPrice:

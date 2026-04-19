@@ -48,7 +48,7 @@ export class Book {
   @JoinColumn({ name: 'category_id' })
   category?: Category | null;
 
-  @Column({ type: 'varchar', length: 50, default: 'Tieng Viet' })
+  @Column({ type: 'varchar', length: 50, default: 'Tiếng Việt' })
   language!: string;
 
   @Column({ name: 'year_published', type: 'smallint', nullable: true })
