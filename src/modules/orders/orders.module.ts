@@ -10,6 +10,8 @@ import { Order } from '../../database/entities/order.entity';
 import { StockLog } from '../../database/entities/stock-log.entity';
 import { User } from '../../database/entities/user.entity';
 import { AuthModule } from '../auth/auth.module';
+import { PaymentsModule } from '../payments/payments.module';
+import { VouchersModule } from '../vouchers/vouchers.module';
 import { AdminOrdersController } from './controllers/admin-orders.controller';
 import { CustomerOrdersController } from './controllers/customer-orders.controller';
 import { StaffOrdersController } from './controllers/staff-orders.controller';
@@ -30,6 +32,8 @@ import { OrdersService } from './services/orders.service';
       StockLog,
     ]),
     AuthModule,
+    VouchersModule,
+    PaymentsModule,
   ],
   controllers: [
     CustomerOrdersController,

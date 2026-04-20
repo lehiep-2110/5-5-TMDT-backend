@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -22,6 +23,9 @@ import { StockLog } from '../../../database/entities/stock-log.entity';
 import { User } from '../../../database/entities/user.entity';
 import { EmailService } from '../../mocks/email.service';
 import { ShippingService } from '../../mocks/shipping.service';
+import { NotificationsService } from '../../notifications/notifications.service';
+import { PaymentsService } from '../../payments/payments.service';
+import { VouchersService } from '../../vouchers/vouchers.service';
 import { CancelOrderDto } from '../dto/cancel-order.dto';
 import { CreateOrderDto } from '../dto/create-order.dto';
 import {
@@ -29,6 +33,7 @@ import {
   ListOrdersDto,
   StaffListOrdersDto,
 } from '../dto/list-query.dto';
+import { ShipOrderDto } from '../dto/ship-order.dto';
 import {
   UpdatePaymentStatusDto,
   UpdateStatusDto,
@@ -108,10 +113,14 @@ export interface OrderDetail extends OrderSummary {
   note: string | null;
   items: OrderItemView[];
   statusLogs: OrderStatusLogView[];
+  voucherId?: string | null;
+  paymentUrl?: string;
 }
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     @InjectRepository(Order) private readonly orders: Repository<Order>,
     @InjectRepository(OrderItem)
@@ -132,7 +141,28 @@ export class OrdersService {
     private readonly orderState: OrderStateService,
     private readonly shippingService: ShippingService,
     private readonly emailService: EmailService,
+    private readonly notifications: NotificationsService,
+    private readonly vouchersService: VouchersService,
+    private readonly paymentsService: PaymentsService,
   ) {}
+
+  private async notify(
+    userId: string,
+    payload: {
+      type: string;
+      title: string;
+      content: string;
+      link?: string | null;
+    },
+  ): Promise<void> {
+    try {
+      await this.notifications.saveAndEmit(userId, payload);
+    } catch (err) {
+      this.logger.warn(
+        `Notification emit failed for user ${userId}: ${(err as Error).message}`,
+      );
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Create order (checkout)
@@ -141,7 +171,10 @@ export class OrdersService {
     userId: string,
     dto: CreateOrderDto,
   ): Promise<OrderDetail> {
-    if (dto.paymentMethod !== PaymentMethod.COD) {
+    if (
+      dto.paymentMethod !== PaymentMethod.COD &&
+      dto.paymentMethod !== PaymentMethod.VNPAY
+    ) {
       throw new BadRequestException(
         'Phương thức thanh toán sẽ ra mắt trong phase 2.',
       );
@@ -160,141 +193,201 @@ export class OrdersService {
     // Fetch ShippingService quote outside tx; the mock is deterministic.
     const quote = await this.shippingService.calculateFee(address, 0);
 
-    const createdOrderId = await this.dataSource.transaction(
-      async (manager) => {
-        const cart = await manager.find(CartItem, {
-          where: { userId },
-          relations: { book: true },
-          order: { createdAt: 'ASC' },
-        });
-        if (cart.length === 0) {
-          throw new BadRequestException('Giỏ hàng đang trống.');
-        }
+    const isVnpay = dto.paymentMethod === PaymentMethod.VNPAY;
 
-        // Lock rows + validate stock.
-        const bookIds = cart.map((c) => c.bookId);
-        const lockedBooks = await manager
-          .createQueryBuilder(Book, 'b')
-          .setLock('pessimistic_write')
-          .where('b.id IN (:...ids)', { ids: bookIds })
-          .getMany();
-        const byId = new Map(lockedBooks.map((b) => [b.id, b] as const));
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    let createdOrderId: string;
+    try {
+      const manager = qr.manager;
+      const cart = await manager.find(CartItem, {
+        where: { userId },
+        relations: { book: true },
+        order: { createdAt: 'ASC' },
+      });
+      if (cart.length === 0) {
+        throw new BadRequestException('Giỏ hàng đang trống.');
+      }
 
-        const problems: string[] = [];
-        for (const c of cart) {
-          const b = byId.get(c.bookId);
-          if (!b) {
-            problems.push(`Sách ${c.bookId} không tồn tại.`);
-            continue;
-          }
-          if (b.status !== 'ACTIVE') {
-            problems.push(`Sách "${b.title}" không còn được bán.`);
-            continue;
-          }
-          if (b.stockQuantity < c.quantity) {
-            problems.push(
-              `Sách "${b.title}" chỉ còn ${b.stockQuantity} quyển (bạn đặt ${c.quantity}).`,
-            );
-          }
+      // Lock rows + validate stock.
+      const bookIds = cart.map((c) => c.bookId);
+      const lockedBooks = await manager
+        .createQueryBuilder(Book, 'b')
+        .setLock('pessimistic_write')
+        .where('b.id IN (:...ids)', { ids: bookIds })
+        .getMany();
+      const byId = new Map(lockedBooks.map((b) => [b.id, b] as const));
+
+      const problems: string[] = [];
+      for (const c of cart) {
+        const b = byId.get(c.bookId);
+        if (!b) {
+          problems.push(`Sách ${c.bookId} không tồn tại.`);
+          continue;
         }
-        if (problems.length > 0) {
-          throw new BadRequestException(
-            `Không thể đặt hàng: ${problems.join(' ')}`,
+        if (b.status !== 'ACTIVE') {
+          problems.push(`Sách "${b.title}" không còn được bán.`);
+          continue;
+        }
+        if (b.stockQuantity < c.quantity) {
+          problems.push(
+            `Sách "${b.title}" chỉ còn ${b.stockQuantity} quyển (bạn đặt ${c.quantity}).`,
           );
         }
+      }
+      if (problems.length > 0) {
+        throw new BadRequestException(
+          `Không thể đặt hàng: ${problems.join(' ')}`,
+        );
+      }
 
-        // Compute totals.
-        let subtotal = 0;
-        for (const c of cart) {
-          const b = byId.get(c.bookId)!;
-          subtotal += effectivePrice(b) * c.quantity;
-        }
-        const shippingFee = quote.fee;
-        const discountAmount = 0;
-        const totalAmount = subtotal + shippingFee - discountAmount;
+      // Compute subtotal.
+      let subtotal = 0;
+      for (const c of cart) {
+        const b = byId.get(c.bookId)!;
+        subtotal += effectivePrice(b) * c.quantity;
+      }
 
-        // Generate orderCode with a race-safe MAX()+1 pattern inside tx.
-        const orderCode = await this.generateOrderCode(manager);
-
-        // Create the order.
-        const order = manager.create(Order, {
-          orderCode,
+      // Apply voucher if requested.
+      let voucherId: string | null = null;
+      let discountAmount = 0;
+      if (dto.voucherCode) {
+        const validated = await this.vouchersService.validateForCheckout(
+          dto.voucherCode,
+          subtotal,
           userId,
-          addressId: address.id,
-          shippingFee: String(shippingFee),
-          shippingMethod: 'Tiêu chuẩn',
-          voucherId: null,
-          discountAmount: String(discountAmount),
-          subtotal: String(subtotal),
-          totalAmount: String(totalAmount),
-          paymentMethod: PaymentMethod.COD,
-          paymentStatus: PaymentStatus.UNPAID,
-          // COD flow skips PENDING — the order is considered confirmed.
-          status: OrderStatus.CONFIRMED,
-          trackingNumber: null,
-          carrier: quote.carrier,
-          note: dto.note ?? null,
-        });
-        const savedOrder = await manager.save(Order, order);
+        );
+        voucherId = validated.voucherId;
+        discountAmount = validated.discountAmount;
+      }
 
-        // Create order_items snapshot.
-        const itemsToSave: OrderItem[] = cart.map((c) => {
-          const b = byId.get(c.bookId)!;
-          return manager.create(OrderItem, {
-            orderId: savedOrder.id,
-            bookId: b.id,
-            quantity: c.quantity,
-            priceAtTime: String(effectivePrice(b)),
-            bookTitleSnapshot: b.title,
-            isReviewed: false,
-          });
-        });
-        await manager.save(OrderItem, itemsToSave);
+      const shippingFee = quote.fee;
+      const totalAmount = Math.max(0, subtotal + shippingFee - discountAmount);
 
-        // Decrement stock + write stock logs.
-        for (const c of cart) {
-          const b = byId.get(c.bookId)!;
-          const newQty = b.stockQuantity - c.quantity;
-          b.stockQuantity = newQty;
-          await manager.save(Book, b);
-          const log = manager.create(StockLog, {
-            bookId: b.id,
-            changeAmount: -c.quantity,
-            newQuantity: newQty,
-            reason: StockReason.SALE,
-            orderId: savedOrder.id,
-            createdBy: userId,
-            note: `Bán theo đơn ${orderCode}.`,
-          });
-          await manager.save(StockLog, log);
-        }
+      // Generate orderCode with a race-safe MAX()+1 pattern inside tx.
+      const orderCode = await this.generateOrderCode(manager);
 
-        // Status log: null -> CONFIRMED.
-        const log = manager.create(OrderStatusLog, {
+      // Create the order.
+      const order = manager.create(Order, {
+        orderCode,
+        userId,
+        addressId: address.id,
+        shippingFee: String(shippingFee),
+        shippingMethod: 'Tiêu chuẩn',
+        voucherId,
+        discountAmount: String(discountAmount),
+        subtotal: String(subtotal),
+        totalAmount: String(totalAmount),
+        paymentMethod: dto.paymentMethod,
+        paymentStatus: PaymentStatus.UNPAID,
+        // COD auto-confirms; VNPAY waits for gateway success.
+        status: isVnpay ? OrderStatus.PENDING : OrderStatus.CONFIRMED,
+        trackingNumber: null,
+        carrier: quote.carrier,
+        note: dto.note ?? null,
+      });
+      const savedOrder = await manager.save(Order, order);
+
+      // Create order_items snapshot.
+      const itemsToSave: OrderItem[] = cart.map((c) => {
+        const b = byId.get(c.bookId)!;
+        return manager.create(OrderItem, {
           orderId: savedOrder.id,
-          fromStatus: null,
-          toStatus: OrderStatus.CONFIRMED,
-          changedBy: userId,
-          note: 'Đặt đơn COD, tự động xác nhận.',
+          bookId: b.id,
+          quantity: c.quantity,
+          priceAtTime: String(effectivePrice(b)),
+          bookTitleSnapshot: b.title,
+          isReviewed: false,
         });
-        await manager.save(OrderStatusLog, log);
+      });
+      await manager.save(OrderItem, itemsToSave);
 
-        // Clear cart.
-        await manager.delete(CartItem, { userId });
+      // Reserve stock immediately for both COD and VNPAY — VNPAY restores on cancel/timeout.
+      for (const c of cart) {
+        const b = byId.get(c.bookId)!;
+        const newQty = b.stockQuantity - c.quantity;
+        b.stockQuantity = newQty;
+        await manager.save(Book, b);
+        const log = manager.create(StockLog, {
+          bookId: b.id,
+          changeAmount: -c.quantity,
+          newQuantity: newQty,
+          reason: StockReason.SALE,
+          orderId: savedOrder.id,
+          createdBy: userId,
+          note: `Bán theo đơn ${orderCode}.`,
+        });
+        await manager.save(StockLog, log);
+      }
 
-        return savedOrder.id;
-      },
-    );
+      // Status log.
+      const initialLog = manager.create(OrderStatusLog, {
+        orderId: savedOrder.id,
+        fromStatus: null,
+        toStatus: isVnpay ? OrderStatus.PENDING : OrderStatus.CONFIRMED,
+        changedBy: userId,
+        note: isVnpay
+          ? 'Tạo đơn VNPAY, chờ thanh toán.'
+          : 'Đặt đơn COD, tự động xác nhận.',
+      });
+      await manager.save(OrderStatusLog, initialLog);
+
+      // Redeem voucher inside the same transaction (atomic).
+      if (voucherId) {
+        await this.vouchersService.redeemVoucher(
+          voucherId,
+          userId,
+          savedOrder.id,
+          discountAmount,
+          qr,
+        );
+      }
+
+      // Clear cart.
+      await manager.delete(CartItem, { userId });
+
+      createdOrderId = savedOrder.id;
+      await qr.commitTransaction();
+    } catch (err) {
+      await qr.rollbackTransaction();
+      throw err;
+    } finally {
+      await qr.release();
+    }
 
     // Post-commit side effects.
+    const createdOrder = await this.orders.findOne({
+      where: { id: createdOrderId },
+    });
+
+    if (isVnpay) {
+      // TODO phase 2 auto-cancel PENDING VNPAY after 15 minutes
+      const detail = await this.getById(createdOrderId, { asAdmin: false });
+      return {
+        ...detail,
+        paymentUrl: this.paymentsService.buildPaymentUrl(createdOrderId),
+      };
+    }
+
     try {
-      await this.emailService.sendOrderConfirmation(
-        user.email,
-        (await this.orders.findOne({ where: { id: createdOrderId } }))!
-          .orderCode,
-      );
+      if (createdOrder) {
+        await this.emailService.sendOrderConfirmation(
+          user.email,
+          createdOrder.orderCode,
+        );
+      }
     } catch {
       // Email is a mock; failure should not break the checkout response.
+    }
+
+    if (createdOrder) {
+      await this.notify(userId, {
+        type: 'ORDER_CONFIRMED',
+        title: `Đơn ${createdOrder.orderCode} đã xác nhận`,
+        content: `Cảm ơn bạn đã đặt hàng. Tổng ${createdOrder.totalAmount}đ.`,
+        link: `/orders/${createdOrder.id}`,
+      });
     }
 
     return this.getById(createdOrderId, { asAdmin: false });
@@ -456,7 +549,11 @@ export class OrdersService {
     orderId: string,
     dto: CancelOrderDto,
   ): Promise<OrderDetail> {
-    await this.dataSource.transaction(async (manager) => {
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    try {
+      const manager = qr.manager;
       const order = await manager.findOne(Order, { where: { id: orderId } });
       if (!order) throw new NotFoundException('Đơn hàng không tồn tại.');
       if (order.userId !== userId) {
@@ -470,6 +567,10 @@ export class OrdersService {
       );
 
       await this.restoreStockForOrder(manager, order, userId, dto.reason);
+
+      if (order.voucherId) {
+        await this.vouchersService.restoreVoucher(order.voucherId, order.userId, qr);
+      }
 
       const previousStatus = order.status;
       order.status = OrderStatus.CANCELLED;
@@ -486,7 +587,26 @@ export class OrdersService {
         note: dto.reason ?? 'Khách hàng huỷ đơn.',
       });
       await manager.save(OrderStatusLog, log);
-    });
+      await qr.commitTransaction();
+    } catch (err) {
+      await qr.rollbackTransaction();
+      throw err;
+    } finally {
+      await qr.release();
+    }
+
+    // Post-commit notification.
+    const cancelled = await this.orders.findOne({ where: { id: orderId } });
+    if (cancelled) {
+      await this.notify(userId, {
+        type: 'ORDER_CANCELLED',
+        title: `Đơn ${cancelled.orderCode} đã huỷ`,
+        content: dto.reason
+          ? `Bạn đã huỷ đơn với lý do: ${dto.reason}.`
+          : 'Bạn đã huỷ đơn hàng thành công.',
+        link: `/orders/${cancelled.id}`,
+      });
+    }
 
     return this.getById(orderId, { asAdmin: false });
   }
@@ -535,6 +655,86 @@ export class OrdersService {
       } catch {
         // best-effort
       }
+      await this.notify(order.userId, {
+        type: 'ORDER_PROCESSING',
+        title: `Đơn ${order.orderCode} đang đóng gói`,
+        content: `Đội ngũ kho đang chuẩn bị đơn hàng của bạn.`,
+        link: `/orders/${order.id}`,
+      });
+    }
+
+    return this.getById(orderId, { asAdmin: true });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Staff: mark as shipped (PROCESSING -> SHIPPING)
+  // ---------------------------------------------------------------------------
+  async staffShip(
+    staffId: string,
+    orderId: string,
+    dto: ShipOrderDto,
+  ): Promise<OrderDetail> {
+    const carrier = (dto.carrier ?? '').trim();
+    const trackingNumber = (dto.trackingNumber ?? '').trim();
+    if (!carrier) {
+      throw new BadRequestException('Đơn vị vận chuyển không được để trống.');
+    }
+    if (!trackingNumber) {
+      throw new BadRequestException('Mã vận đơn không được để trống.');
+    }
+
+    const orderCode = await this.dataSource.transaction(async (manager) => {
+      const order = await manager.findOne(Order, { where: { id: orderId } });
+      if (!order) throw new NotFoundException('Đơn hàng không tồn tại.');
+      if (order.status !== OrderStatus.PROCESSING) {
+        throw new BadRequestException(
+          `Chỉ bàn giao đơn đang ở trạng thái PROCESSING (hiện tại: ${order.status}).`,
+        );
+      }
+
+      this.orderState.assertCanTransition(
+        order.status,
+        OrderStatus.SHIPPING,
+        UserRole.WAREHOUSE_STAFF,
+      );
+
+      const previousStatus = order.status;
+      order.status = OrderStatus.SHIPPING;
+      order.carrier = carrier;
+      order.trackingNumber = trackingNumber;
+      await manager.save(Order, order);
+
+      const log = manager.create(OrderStatusLog, {
+        orderId: order.id,
+        fromStatus: previousStatus,
+        toStatus: OrderStatus.SHIPPING,
+        changedBy: staffId,
+        note: `Bàn giao ${carrier}: ${trackingNumber}`,
+      });
+      await manager.save(OrderStatusLog, log);
+      return order.orderCode;
+    });
+
+    const order = await this.orders.findOne({
+      where: { id: orderId },
+      relations: { user: true },
+    });
+    if (order?.user) {
+      try {
+        await this.emailService.sendOrderStatusUpdate(
+          order.user.email,
+          orderCode,
+          'SHIPPING',
+        );
+      } catch {
+        // best-effort
+      }
+      await this.notify(order.userId, {
+        type: 'ORDER_SHIPPING',
+        title: `Đơn ${order.orderCode} đang giao`,
+        content: `Mã vận đơn ${trackingNumber} · ĐVVC ${carrier}`,
+        link: `/orders/${order.id}`,
+      });
     }
 
     return this.getById(orderId, { asAdmin: true });
@@ -548,7 +748,12 @@ export class OrdersService {
     orderId: string,
     dto: UpdateStatusDto,
   ): Promise<OrderDetail> {
-    const orderCode = await this.dataSource.transaction(async (manager) => {
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    let orderCode: string;
+    try {
+      const manager = qr.manager;
       const order = await manager.findOne(Order, { where: { id: orderId } });
       if (!order) throw new NotFoundException('Đơn hàng không tồn tại.');
       if (order.status === OrderStatus.CANCELLED) {
@@ -565,6 +770,9 @@ export class OrdersService {
 
       if (dto.toStatus === OrderStatus.CANCELLED) {
         await this.restoreStockForOrder(manager, order, adminId, dto.note);
+        if (order.voucherId) {
+          await this.vouchersService.restoreVoucher(order.voucherId, order.userId, qr);
+        }
         if (order.paymentStatus === PaymentStatus.PAID) {
           order.paymentStatus = PaymentStatus.REFUND_PENDING;
         }
@@ -581,8 +789,14 @@ export class OrdersService {
         note: dto.note ?? null,
       });
       await manager.save(OrderStatusLog, log);
-      return order.orderCode;
-    });
+      orderCode = order.orderCode;
+      await qr.commitTransaction();
+    } catch (err) {
+      await qr.rollbackTransaction();
+      throw err;
+    } finally {
+      await qr.release();
+    }
 
     // Post-commit email for visible transitions.
     const order = await this.orders.findOne({
@@ -598,6 +812,24 @@ export class OrdersService {
         );
       } catch {
         // best-effort
+      }
+      if (dto.toStatus === OrderStatus.CANCELLED) {
+        await this.notify(order.userId, {
+          type: 'ORDER_CANCELLED',
+          title: `Đơn ${order.orderCode} đã bị huỷ`,
+          content:
+            dto.note ??
+            'Quản trị viên đã huỷ đơn hàng của bạn. Vui lòng liên hệ CSKH nếu cần hỗ trợ.',
+          link: `/orders/${order.id}`,
+        });
+      } else {
+        await this.notify(order.userId, {
+          type: 'ORDER_STATUS_UPDATED',
+          title: `Đơn ${order.orderCode} chuyển sang ${dto.toStatus}`,
+          content:
+            dto.note ?? `Trạng thái đơn hàng được cập nhật: ${dto.toStatus}.`,
+          link: `/orders/${order.id}`,
+        });
       }
     }
 
@@ -805,6 +1037,7 @@ export class OrdersService {
       note: order.note,
       itemCount,
       firstBookTitle,
+      voucherId: order.voucherId,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
       user: order.user

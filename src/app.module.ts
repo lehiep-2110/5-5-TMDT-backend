@@ -13,8 +13,14 @@ import { AuthModule } from './modules/auth/auth.module';
 import { CartModule } from './modules/cart/cart.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { MocksModule } from './modules/mocks/mocks.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OrdersModule } from './modules/orders/orders.module';
+import { PaymentsModule } from './modules/payments/payments.module';
+import { ReportsModule } from './modules/reports/reports.module';
+import { ReviewsModule } from './modules/reviews/reviews.module';
 import { UsersModule } from './modules/users/users.module';
+import { VouchersModule } from './modules/vouchers/vouchers.module';
+import { WishlistModule } from './modules/wishlist/wishlist.module';
 
 @Module({
   imports: [
@@ -45,10 +51,16 @@ import { UsersModule } from './modules/users/users.module';
     RedisModule,
     MocksModule,
     AuthModule,
+    NotificationsModule,
     UsersModule,
     CatalogModule,
     CartModule,
+    VouchersModule,
+    PaymentsModule,
     OrdersModule,
+    ReviewsModule,
+    WishlistModule,
+    ReportsModule,
   ],
   controllers: [AppController],
   providers: [

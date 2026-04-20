@@ -53,15 +53,22 @@ export class OrderStateService {
         return;
       }
       case UserRole.WAREHOUSE_STAFF: {
-        // Staff may only confirm packaging: CONFIRMED -> PROCESSING.
+        // Staff may: confirm packaging (CONFIRMED -> PROCESSING) and hand off
+        // to the carrier (PROCESSING -> SHIPPING).
         if (
           from === OrderStatus.CONFIRMED &&
           to === OrderStatus.PROCESSING
         ) {
           return;
         }
+        if (
+          from === OrderStatus.PROCESSING &&
+          to === OrderStatus.SHIPPING
+        ) {
+          return;
+        }
         throw new BadRequestException(
-          'Nhân viên kho chỉ được xác nhận đóng gói (CONFIRMED → PROCESSING).',
+          'Nhân viên kho chỉ được xác nhận đóng gói hoặc bàn giao vận chuyển.',
         );
       }
       case UserRole.CUSTOMER: {

@@ -101,19 +101,17 @@ export class AuthController {
   async me(@CurrentUser() user: AuthenticatedUser) {
     const dbUser = await this.authService.findUserById(user.id);
     if (!dbUser) {
-      return { user: null };
+      return null;
     }
     return {
-      user: {
-        id: dbUser.id,
-        email: dbUser.email,
-        fullName: dbUser.fullName,
-        role: dbUser.role,
-        status: dbUser.status,
-        avatarUrl: dbUser.avatarUrl,
-        phone: dbUser.phone,
-        createdAt: dbUser.createdAt,
-      },
+      id: dbUser.id,
+      email: dbUser.email,
+      fullName: dbUser.fullName,
+      role: dbUser.role,
+      status: dbUser.status,
+      avatarUrl: dbUser.avatarUrl,
+      phone: dbUser.phone,
+      createdAt: dbUser.createdAt,
     };
   }
 
