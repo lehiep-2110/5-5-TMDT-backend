@@ -22,7 +22,7 @@ export class DateRangeDto {
 
 export type OverviewPeriod = 'today' | 'week' | 'month' | 'year';
 
-export class OverviewQueryDto {
+export class OverviewQueryDto extends DateRangeDto {
   @IsOptional()
   @IsIn(['today', 'week', 'month', 'year'])
   period?: OverviewPeriod = 'month';

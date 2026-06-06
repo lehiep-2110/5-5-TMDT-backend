@@ -35,7 +35,11 @@ export class ReportsController {
 
   @Get('overview')
   overview(@Query() query: OverviewQueryDto) {
-    return this.reportsService.getOverview(query.period ?? 'month');
+    return this.reportsService.getOverview(
+      query.period ?? 'month',
+      query.from,
+      query.to,
+    );
   }
 
   @Get('revenue-series')

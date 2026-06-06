@@ -127,8 +127,28 @@ export class ReportsService {
     return toNumber(row?.count, 0);
   }
 
-  async getOverview(period: OverviewPeriod = 'month') {
-    const { currentFrom, currentTo, priorFrom, priorTo } = periodWindow(period);
+  async getOverview(
+    period: OverviewPeriod = 'month',
+    fromIso?: string,
+    toIso?: string,
+  ) {
+    let currentFrom: Date;
+    let currentTo: Date;
+    let priorFrom: Date;
+    let priorTo: Date;
+
+    if (fromIso || toIso) {
+      // Custom range (Dashboard date filter): prior window = a window of the
+      // same length immediately before `from`, so deltas stay comparable.
+      const { from, to } = this.parseRange(fromIso, toIso, 30);
+      const span = to.getTime() - from.getTime();
+      currentFrom = from;
+      currentTo = to;
+      priorTo = new Date(from.getTime());
+      priorFrom = new Date(from.getTime() - span);
+    } else {
+      ({ currentFrom, currentTo, priorFrom, priorTo } = periodWindow(period));
+    }
 
     const [
       revCurrent,
@@ -150,7 +170,7 @@ export class ReportsService {
     const aovPrior = ordersPrior > 0 ? revPrior / ordersPrior : 0;
 
     return {
-      period,
+      period: fromIso || toIso ? 'custom' : period,
       range: { from: currentFrom.toISOString(), to: currentTo.toISOString() },
       metrics: {
         revenue: deltaMetric(Math.round(revCurrent), Math.round(revPrior)),
