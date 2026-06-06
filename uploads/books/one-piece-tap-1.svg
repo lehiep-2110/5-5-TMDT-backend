@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" width="600" height="800">
+  <rect width="600" height="800" fill="#111827"/>
+  <rect x="28" y="28" width="544" height="744" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>
+  <text x="300" y="120" text-anchor="middle" fill="#ffffff" font-family="Georgia, serif" font-size="16" letter-spacing="2" opacity="0.8" style="text-transform:uppercase;">EIICHIRO ODA</text>
+  <line x1="200" y1="150" x2="400" y2="150" stroke="rgba(255,255,255,0.35)" stroke-width="1"/>
+  <text x="300" y="386" text-anchor="middle" fill="#ffffff" font-family="Georgia, serif" font-size="44" font-weight="700"><tspan x="300" dy="0">One Piece tập</tspan><tspan x="300" dy="64">1</tspan></text>
+  <text x="300" y="740" text-anchor="middle" fill="#ffffff" font-family="Georgia, serif" font-size="12" letter-spacing="4" opacity="0.7">THE EDITORIAL</text>
+</svg>

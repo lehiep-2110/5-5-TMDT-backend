@@ -41,8 +41,6 @@ temp/
 # NestJS
 .nest/
 
-# Uploads (user-generated content)
-/uploads
 
 # TypeScript cache
 *.tsbuildinfo
