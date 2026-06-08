@@ -118,6 +118,11 @@ export class TopCustomersQueryDto extends DateRangeDto {
   @Min(1)
   @Max(100)
   limit?: number = 10;
+
+  /** 'spent' = chi tiêu cao nhất (mặc định), 'orders' = số đơn nhiều nhất. */
+  @IsOptional()
+  @IsIn(['spent', 'orders'])
+  sort?: 'spent' | 'orders' = 'spent';
 }
 
 export class RegistrationSeriesQueryDto extends DateRangeDto {

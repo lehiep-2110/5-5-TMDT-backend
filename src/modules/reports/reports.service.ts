@@ -815,7 +815,12 @@ export class ReportsService {
   // Khách hàng (customers)
   // ============================================================
 
-  async getTopCustomers(fromIso?: string, toIso?: string, limit = 10) {
+  async getTopCustomers(
+    fromIso?: string,
+    toIso?: string,
+    limit = 10,
+    sort: 'spent' | 'orders' = 'spent',
+  ) {
     const { from, to } = this.parseRange(fromIso, toIso, 30);
     const safeLimit = Math.min(Math.max(limit || 10, 1), 100);
 
@@ -841,7 +846,8 @@ export class ReportsService {
       .groupBy('u.id')
       .addGroupBy('u.email')
       .addGroupBy('u.full_name')
-      .orderBy('total_spent', 'DESC')
+      .orderBy(sort === 'orders' ? 'order_count' : 'total_spent', 'DESC')
+      .addOrderBy(sort === 'orders' ? 'total_spent' : 'order_count', 'DESC')
       .limit(safeLimit)
       .getRawMany();
 

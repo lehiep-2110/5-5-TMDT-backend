@@ -144,6 +144,7 @@ export class ReportsController {
       query.from,
       query.to,
       query.limit ?? 10,
+      query.sort ?? 'spent',
     );
     return { items };
   }
