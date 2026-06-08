@@ -10,11 +10,10 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   app.setGlobalPrefix('api');
-  const corsOrigin =
-    process.env.FRONTEND_ORIGIN ||
-    `http://localhost:${process.env.FRONTEND_PORT || 3009}`;
   app.enableCors({
-    origin: corsOrigin,
+    // Reflect the request origin so any domain is allowed.
+    // A literal '*' can't be combined with credentials, so echo the origin instead.
+    origin: true,
     credentials: true,
   });
 
